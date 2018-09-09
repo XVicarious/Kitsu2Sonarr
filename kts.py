@@ -9,13 +9,21 @@ from slugify import slugify
 from Pymoe import Kitsu
 import ujson
 
-KITSU_HEADER = {
-    'User-Agent': 'Kitsu2Sonarr',
-    'Accept': 'application/vnd.api+json',
-    'Content-Type': 'application/vnd.api+json'
-}
 
 JAP_MAP_FILE = "library.json"
+
+requests.models.json = ujson
+
+
+def load_map():
+    """ Load the library from file """
+    try:
+        with open(JAP_MAP_FILE, 'r') as map_file:
+            return ujson.load(map_file)
+    except json.JSONDecodeError as json_error:
+        print("There seems to be an issue with {} at L{}:C{}."
+              .format(JAP_MAP_FILE, json_error.lineno, json_error.colno))
+        return None
 
 
 def save_map(map_var):
@@ -23,8 +31,8 @@ def save_map(map_var):
     Save the map of shows.
     :param map_var: the map dictionary
     """
-    with open(JAP_MAP_FILE, "w") as f:
-        json.dump(map_var, f)
+    with open(JAP_MAP_FILE, "w") as map_file:
+        json.dump(map_var, map_file)
 
 
 def get_library(instance, user_id):
@@ -50,13 +58,21 @@ def get_library_item(item_id):
 
 
 def gather_library_tvdb_ids(library_items, instance, user_id):
+    """
+    Gather any shows from Kitsu from your library
+    :param library_items: the current library of shows
+    :param instance: the Kitsu api instance to find things with
+    :param user_id: the user id of the user you want to get the library from
+    :return: the new library, updated with new items
+    """
     library = get_library(instance, user_id)
     for item in library:
         if item['attributes']['status'] != 'dropped':
             lib_item = get_library_item(item['id'])
-            if lib_item is not None and lib_item['id'] not in library_items\
-                and lib_item['type'] == "anime"\
-                    and lib_item['attributes']['subtype'] == "TV":
+            if lib_item is not None and lib_item['id'] not in library_items \
+                    and lib_item['type'] == "anime" \
+                    and (lib_item['attributes']['subtype'] == "TV"
+                         or lib_item['attributes']['subtype'] == "movie"):
                 mapping = instance.mappings.get("thetvdb/series", lib_item['id'])
                 if mapping is not None:
                     en_name = None
@@ -69,7 +85,8 @@ def gather_library_tvdb_ids(library_items, instance, user_id):
                             "romaji": lib_item['attributes']['titles']['en_jp'],
                             'english': en_name
                         },
-                        'tvdbId': mapping}
+                        'tvdbId': mapping,
+                        'type': lib_item['attributes']['subtype']}
                     save_map(library_items)
     return library_items
 
@@ -84,7 +101,7 @@ def get_sonarr_profiles(sonarr_api_path, sonarr_api_key):  # 3
     profiles = requests.get("{}/profile?apiKey={}".format(sonarr_api_path, sonarr_api_key))
     if profiles.status_code == 200:
         return profiles.json()
-    raise ConnectionError()
+    raise ConnectionError(profiles.status_code)
 
 
 def get_sonarr_paths(sonarr_api_path, sonarr_api_key):  # 1
@@ -97,7 +114,7 @@ def get_sonarr_paths(sonarr_api_path, sonarr_api_key):  # 1
     paths = requests.get("{}/rootfolder?apiKey={}".format(sonarr_api_path, sonarr_api_key))
     if paths.status_code == 200:
         return paths.json()
-    raise ConnectionError()
+    raise ConnectionError(paths.status_code)
 
 
 def sonarr_add_show(api_path, api_key, item):
@@ -114,20 +131,22 @@ def sonarr_add_show(api_path, api_key, item):
         print("The english name was None")
     item_id = item["tvdbId"].split("/")[0]
     sonarr_data = {
-        "tvdbId": item_id,
+        "tvdbId": int(item_id),
         "title": item_name,
         "qualityProfileId": 3,
         "titleSlug": slugify(item_name),
         "images": [],
         "seasons": [],
-        "rootFolderPath": "/anime"
+        "rootFolderPath": "/anime",
+        "seriesType": "anime"
     }
     show = requests.post("{}/series?apiKey={}".format(api_path, api_key), json=sonarr_data)
     if show.status_code == 200:
-        print(show.json()['data'])
-        #if show.json()['data']
-        return
-    raise ConnectionError()
+        return True
+    elif show.status_code == 400 and \
+            show.json()[0]['errorMessage'] == 'This series has already been added':
+        return False
+    raise ConnectionError(show.status_code, show.url, show.json())
 
 
 def load_config():
@@ -165,17 +184,20 @@ def load_config():
 
 
 def main():
+    """ Do the things """
     config = load_config()
     instance = Kitsu(config['kitsu.io']['client_id'], config['kitsu.io']['client_secret'])
-    library_items = dict()
-    try:
-        with open(JAP_MAP_FILE, 'r') as f:
-            library_items = ujson.load(f)
-    except json.JSONDecodeError as json_error:
-        print("There seems to be an issue with {} at L{}:C{}.".format(JAP_MAP_FILE, json_error.lineno, json_error.colno))
+    print("Trying to open your library file.")
+    library_items = load_map()
+    print("Gathering new shows from Kitsu")
     library_items = gather_library_tvdb_ids(library_items, instance, config['kitsu.io']['user_id'])
+    print("Adding shows to Sonarr")
     for key, value in library_items.items():
-        sonarr_add_show(config['sonarr']['url'], config['sonarr']['api_key'], value)
+        if ('inSonarr' not in value or not value['inSonarr'])\
+                and ('type' not in value or value['type'] == 'TV'):
+            sonarr_add_show(config['sonarr']['url'], config['sonarr']['api_key'], value)
+            library_items[key]['inSonarr'] = True
+            save_map(library_items)
 
 
 if __name__ == "__main__":
