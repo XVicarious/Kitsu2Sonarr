@@ -35,16 +35,6 @@ def save_map(map_var):
         json.dump(map_var, map_file)
 
 
-def get_library(instance, user_id):
-    """
-    Get the user's library from Kitsu
-    :param instance: kitsu instance
-    :param user_id: user id for the user's library
-    :return: the user's library
-    """
-    return instance.library.get(user_id)
-
-
 def get_library_item(item_id):
     """
     Get an individual library entry's media
@@ -65,7 +55,7 @@ def gather_library_tvdb_ids(library_items, instance, user_id):
     :param user_id: the user id of the user you want to get the library from
     :return: the new library, updated with new items
     """
-    library = get_library(instance, user_id)
+    library = instance.library.get(user_id)
     for item in library:
         if item['attributes']['status'] != 'dropped':
             lib_item = get_library_item(item['id'])
