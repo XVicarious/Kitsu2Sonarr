@@ -117,12 +117,13 @@ def get_sonarr_paths(sonarr_api_path, sonarr_api_key):  # 1
     raise ConnectionError(paths.status_code)
 
 
-def sonarr_add_show(api_path, api_key, item):
+def sonarr_add_show(api_path, api_key, item, profile_id=1):
     """
     Add a show to Sonarr
     :param api_path: where your Sonarr instance is located
     :param api_key: API key for your Sonarr instance
     :param item: the item you want to add to Sonarr
+    :param profile_id: the profile id you want to use for anime going forward, defaults to 1
     """
     item_name = item["name"]["romaji"]
     try:
@@ -133,7 +134,7 @@ def sonarr_add_show(api_path, api_key, item):
     sonarr_data = {
         "tvdbId": int(item_id),
         "title": item_name,
-        "qualityProfileId": 3,
+        "qualityProfileId": profile_id,
         "titleSlug": slugify(item_name),
         "images": [],
         "seasons": [],
@@ -163,8 +164,7 @@ def load_config():
         config['kitsu.io']['user_id'] = None
         with open('kitsu2sonarr.ini', 'w') as configfile:
             config.write(configfile)
-        raise Exception("Missing config items! 'kitsu.io' was added, please fill in those values "
-                        "in \"kitsu2sonarr.ini\"")  # todo: write exception?
+        raise configparser.NoSectionError(section='kitsu.io')
     else:
         for config_key in config['kitsu.io']:
             if config['kitsu.io'][config_key] == '':
@@ -183,9 +183,45 @@ def load_config():
     return config
 
 
+def establish_sonarr_profile(sonarr_api_path, sonarr_api_key):
+    """
+    Have the user tell us what Sonarr profile they want to use
+    :param sonarr_api_path: path to the Sonarr instance
+    :param sonarr_api_key: Sonarr instance API key
+    :return: the index of the profile to use for the config
+    """
+    profiles = get_sonarr_profiles(sonarr_api_path, sonarr_api_key)
+    print("-----------------------")
+    for profile in profiles:
+        print("{profile_id}. {profile_name}, Cutoff: {profile_cutoff}".format(
+            profile_id=profile['id'],
+            profile_name=profile['name'],
+            profile_cutoff=profile['cutoff']['name']
+        ))
+    input_profile = input("Please select the profile number: ")
+    while True:
+        try:
+            input_profile = int(input_profile)
+            if input_profile > len(profiles) - 1:
+                raise IndexError
+            break
+        except ValueError:
+            input_profile = input("Please input a profile id: ")
+        except IndexError:
+            input_profile = input("Please input a profile id: ")
+    return input_profile
+
+
 def main():
     """ Do the things """
     config = load_config()
+    try:
+        profile_id = config['sonarr']['profile_id']
+    except KeyError:
+        profile_id = establish_sonarr_profile(config['sonarr']['url'], config['sonarr']['api_key'])
+        config['sonarr']['profile_id'] = str(profile_id)
+        with open('kitsu2sonarr.ini', 'w') as config_file:
+            config.write(config_file)
     instance = Kitsu(config['kitsu.io']['client_id'], config['kitsu.io']['client_secret'])
     print("Trying to open your library file.")
     library_items = load_map()
@@ -195,7 +231,7 @@ def main():
     for key, value in library_items.items():
         if ('inSonarr' not in value or not value['inSonarr'])\
                 and ('type' not in value or value['type'] == 'TV'):
-            sonarr_add_show(config['sonarr']['url'], config['sonarr']['api_key'], value)
+            sonarr_add_show(config['sonarr']['url'], config['sonarr']['api_key'], value, profile_id)
             library_items[key]['inSonarr'] = True
             save_map(library_items)
 
