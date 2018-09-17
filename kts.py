@@ -47,6 +47,18 @@ def get_library_item(item_id):
     raise ConnectionError()
 
 
+def get_mapping_from_kitsu(kitsu_id):
+    """
+    Get a list of all mappings from Kitsu for the specified show
+    :param kitsu_id: the kitsu id for the show
+    :return: json of the mappings
+    """
+    mappings = requests.get("https://kitsu.io/api/edge/anime/{}/mappings".format(kitsu_id))
+    if mappings.status_code == 200:
+        return mappings.json()['data']
+    raise ConnectionError(mappings.status_code, mappings.url)
+
+
 def gather_library_tvdb_ids(library_items, instance, user_id):
     """
     Gather any shows from Kitsu from your library
@@ -63,7 +75,15 @@ def gather_library_tvdb_ids(library_items, instance, user_id):
                     and lib_item['type'] == "anime" \
                     and (lib_item['attributes']['subtype'] == "TV"
                          or lib_item['attributes']['subtype'] == "movie"):
-                mapping = instance.mappings.get("thetvdb/series", lib_item['id'])
+                # Grab the mapping data for this show
+                mapping_data = get_mapping_from_kitsu(lib_item['id'])
+                mapping = None
+                for maps in mapping_data:
+                    if maps['attributes']['externalSite'] == 'thetvdb':
+                        # Get the mapping for "thetvdb" and cut it up, as it uses a "/" to separate
+                        # the id and the season number (if the season number is there)
+                        mapping = maps['attributes']['externalId'].split('/')
+                        break
                 if mapping is not None:
                     en_name = None
                     try:
@@ -75,10 +95,25 @@ def gather_library_tvdb_ids(library_items, instance, user_id):
                             "romaji": lib_item['attributes']['titles']['en_jp'],
                             'english': en_name
                         },
-                        'tvdbId': mapping,
+                        'tvdbId': mapping[0],
+                        # There might not be a season number, if so it should just be none
+                        'tvdbSeason': mapping[1] if len(mapping) > 1 else None,
                         'type': lib_item['attributes']['subtype']}
                     save_map(library_items)
     return library_items
+
+
+def get_sonarr_shows(sonarr_api_path, sonarr_api_key):
+    """
+    Get all shows in Sonarr
+    :param sonarr_api_path: path to the Sonarr instance + api
+    :param sonarr_api_key: sonarr api key
+    :return: json of all shows in Sonarr
+    """
+    shows = requests.get("{}/series?apiKey={}".format(sonarr_api_path, sonarr_api_key))
+    if shows.status_code == 200:
+        return shows.json()
+    raise ConnectionError(shows.status_code)
 
 
 def get_sonarr_profiles(sonarr_api_path, sonarr_api_key):  # 3
@@ -115,11 +150,11 @@ def sonarr_add_show(api_path, api_key, item, profile_id=1):
     :param item: the item you want to add to Sonarr
     :param profile_id: the profile id you want to use for anime going forward, defaults to 1
     """
-    item_name = item["name"]["romaji"]
     try:
-        item_name = item["name"]["en"]
+        item_name = item["name"]["english"]
     except KeyError:
         print("The english name was None")
+        item_name = item["name"]["romaji"]
     item_id = item["tvdbId"].split("/")[0]
     sonarr_data = {
         "tvdbId": int(item_id),
@@ -137,7 +172,7 @@ def sonarr_add_show(api_path, api_key, item, profile_id=1):
     elif show.status_code == 400 and \
             show.json()[0]['errorMessage'] == 'This series has already been added':
         return False
-    raise ConnectionError(show.status_code, show.url, show.json())
+    raise ConnectionError(show.status_code, show.url)
 
 
 def load_config():
@@ -221,9 +256,16 @@ def main():
     for key, value in library_items.items():
         if ('inSonarr' not in value or not value['inSonarr'])\
                 and ('type' not in value or value['type'] == 'TV'):
-            sonarr_add_show(config['sonarr']['url'], config['sonarr']['api_key'], value, profile_id)
-            library_items[key]['inSonarr'] = True
-            save_map(library_items)
+            try:
+                sonarr_add_show(
+                    config['sonarr']['url'],
+                    config['sonarr']['api_key'],
+                    value,
+                    profile_id)
+                library_items[key]['inSonarr'] = True
+                save_map(library_items)
+            except ConnectionError:
+                print("Couldn't add {}".format(value))
 
 
 if __name__ == "__main__":
